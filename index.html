@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Radials opposés</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#111111">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Radials">
+  <link rel="apple-touch-icon" href="icon-192.png">
+
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 18px; }
+    .card { border: 1px solid #ddd; border-radius: 14px; padding: 14px; margin: 12px 0; }
+    .row { display:flex; gap:10px; flex-wrap: wrap; align-items:center; }
+    input, button, select { font-size: 16px; padding: 10px 12px; border-radius: 12px; border:1px solid #ccc; }
+    button { border: 0; background:#111; color:#fff; }
+    button.secondary { background:#eee; color:#111; border:1px solid #ddd; }
+    .big { font-size: 36px; font-weight: 700; }
+    .muted { color:#666; }
+    .ok { color: #0a7; font-weight:700; }
+    .ko { color: #c22; font-weight:700; }
+    table { width:100%; border-collapse: collapse; }
+    td, th { border-bottom:1px solid #eee; padding: 8px; text-align:left; }
+  </style>
+</head>
+<body>
+  <h1>Entraînement radials opposés</h1>
+
+  <div class="card">
+    <div class="row">
+      <label>Nombre de questions :
+        <select id="nq">
+          <option>10</option><option selected>20</option><option>30</option><option>50</option>
+        </select>
+      </label>
+      <button id="startBtn">Démarrer</button>
+      <button class="secondary" id="resetBtn">Reset</button>
+    </div>
+    <div class="muted" id="status">Prêt.</div>
+  </div>
+
+  <div class="card">
+    <div class="muted">Radial initial</div>
+    <div class="big" id="initial">—</div>
+    <div class="row" style="margin-top:10px">
+      <input id="answer" type="number" inputmode="numeric" placeholder="Ta réponse (1..360)" />
+      <button id="checkBtn">Valider</button>
+      <button class="secondary" id="nextBtn">Suivant</button>
+    </div>
+    <div class="muted" style="margin-top:10px">
+      Temps question : <span id="tq">0.00</span>s • Temps total : <span id="tt">0.00</span>s
+    </div>
+    <div id="feedback" style="margin-top:10px"></div>
+  </div>
+
+  <div class="card">
+    <div><b>Score</b> : <span id="score">0</span>/<span id="done">0</span></div>
+    <div class="muted">Moyenne : <span id="avg">0.00</span>s / question</div>
+  </div>
+
+  <div class="card">
+    <b>Historique</b>
+    <div class="muted">Stocké localement sur ton téléphone.</div>
+    <table>
+      <thead><tr><th>#</th><th>Initial</th><th>Ta réponse</th><th>Correct</th><th>OK</th><th>Temps</th></tr></thead>
+      <tbody id="log"></tbody>
+    </table>
+  </div>
+
+<script>
+  // Register SW (offline)
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js"));
+  }
+
+  const $ = (id) => document.getElementById(id);
+
+  let N = 20, idx = 0, score = 0;
+  let initial = null, correct = null;
+  let tStartTotal = null, tStartQ = null, timer = null;
+
+  const now = () => performance.now();
+
+  function normalize360(x){
+    x = x % 360;
+    if (x <= 0) x += 360;
+    return x;
+  }
+
+  // Ta règle (équivalente à +180 modulo 360)
+  function oppositeRadial(init){
+    return (init + 180 > 360) ? (init - 180) : (init + 180);
+  }
+
+  function rand1to360(){ return Math.floor(Math.random()*360) + 1; }
+  function setStatus(s){ $("status").textContent = s; }
+  function setFeedback(html){ $("feedback").innerHTML = html; }
+
+  function updateTimers(){
+    if (tStartTotal == null || tStartQ == null) return;
+    $("tq").textContent = ((now() - tStartQ)/1000).toFixed(2);
+    $("tt").textContent = ((now() - tStartTotal)/1000).toFixed(2);
+  }
+
+  function stopTimer(){ if (timer) { clearInterval(timer); timer = null; } }
+  function startTimer(){ stopTimer(); timer = setInterval(updateTimers, 50); }
+
+  function renderScore(){
+    $("score").textContent = score;
+    $("done").textContent = idx;
+    const tt = tStartTotal ? (now() - tStartTotal)/1000 : 0;
+    $("avg").textContent = (idx>0 ? (tt/idx).toFixed(2) : "0.00");
+  }
+
+  function logRow(entry){
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${entry.i}</td>
+      <td>${entry.initial}°</td>
+      <td>${entry.user}°</td>
+      <td>${entry.correct}°</td>
+      <td class="${entry.ok ? "ok":"ko"}">${entry.ok ? "OK":"KO"}</td>
+      <td>${entry.time.toFixed(2)}s</td>`;
+    $("log").prepend(tr);
+  }
+
+  function saveEntry(entry){
+    const key = "radial_log";
+    const arr = JSON.parse(localStorage.getItem(key) || "[]");
+    arr.push(entry);
+    localStorage.setItem(key, JSON.stringify(arr.slice(-300)));
+  }
+
+  function loadLog(){
+    $("log").innerHTML = "";
+    const arr = JSON.parse(localStorage.getItem("radial_log") || "[]");
+    arr.slice(-50).reverse().forEach(e => logRow(e));
+  }
+
+  function newQuestion(){
+    initial = rand1to360();
+    correct = oppositeRadial(initial);
+    $("initial").textContent = initial + "°";
+    $("answer").value = "";
+    $("answer").focus();
+    setFeedback("");
+    tStartQ = now();
+    startTimer();
+    setStatus(`Question ${idx+1}/${N}`);
+  }
+
+  function finish(){
+    stopTimer();
+    const tt = (now() - tStartTotal)/1000;
+    setStatus(`Terminé. Score ${score}/${N}. Temps total ${tt.toFixed(2)}s.`);
+    setFeedback(`<div class="ok">Série terminée.</div>
+      <div>Score : <b>${score}/${N}</b> — Temps total : <b>${tt.toFixed(2)}s</b> — Moyenne : <b>${(tt/N).toFixed(2)}s</b></div>`);
+    $("initial").textContent = "—";
+  }
+
+  function start(){
+    N = parseInt($("nq").value, 10);
+    idx = 0; score = 0;
+    tStartTotal = now();
+    renderScore();
+    setStatus("Série en cours…");
+    newQuestion();
+  }
+
+  function resetAll(){
+    stopTimer();
+    idx = 0; score = 0;
+    initial = null; correct = null;
+    tStartTotal = null; tStartQ = null;
+    $("initial").textContent = "—";
+    $("answer").value = "";
+    $("tq").textContent = "0.00";
+    $("tt").textContent = "0.00";
+    setFeedback("");
+    renderScore();
+    setStatus("Prêt.");
+  }
+
+  function check(){
+    if (initial == null) return;
+
+    const raw = $("answer").value;
+    if (raw === "") { setFeedback(`<div class="ko">Entre une valeur.</div>`); return; }
+
+    const user = normalize360(parseInt(raw, 10));
+    const ok = (user === correct);
+    const t = (now() - tStartQ)/1000;
+
+    idx++;
+    if (ok) score++;
+    renderScore();
+
+    setFeedback(ok
+      ? `<div class="ok">✅ Juste.</div><div class="muted">Temps: ${t.toFixed(2)}s</div>`
+      : `<div class="ko">❌ Faux.</div><div>Bonne réponse: <b>${correct}°</b></div><div class="muted">Temps: ${t.toFixed(2)}s</div>`
+    );
+
+    saveEntry({ i: idx, initial, user, correct, ok, time: t, ts: Date.now() });
+    loadLog();
+
+    if (idx >= N) finish();
+    else {
+      stopTimer();
+      setStatus(`Question ${idx}/${N} corrigée. Appuie sur "Suivant".`);
+    }
+  }
+
+  function next(){ if (idx < N) newQuestion(); }
+
+  $("startBtn").addEventListener("click", start);
+  $("resetBtn").addEventListener("click", resetAll);
+  $("checkBtn").addEventListener("click", check);
+  $("nextBtn").addEventListener("click", next);
+  $("answer").addEventListener("keydown", (e) => { if (e.key === "Enter") check(); });
+
+  loadLog();
+  resetAll();
+</script>
+</body>
+</html>
